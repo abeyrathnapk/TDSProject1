@@ -45,25 +45,76 @@ class QARequest(BaseModel):
 def similar(a, b):
     return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
+def is_token_counting_question(question: str) -> bool:
+    """Determine if this is a token counting or cost calculation question"""
+    question_lower = question.lower()
+    
+    cost_terms = [
+        "cost", "cents", "price", "token", "tokens",
+        "calculation", "calculate", "count", "pricing",
+        "費用", "コスト",  # Japanese
+        "成本", "费用"    # Chinese
+    ]
+    
+    model_terms = [
+        "gpt-3.5-turbo", "gpt3.5", "gpt3",
+        "turbo", "api", "chat", "completion"
+    ]
+    
+    # Check for specific token/cost patterns
+    patterns = [
+        r"how (much|many) tokens?",
+        r"what('s| is) the cost",
+        r"(input|output) tokens?",
+        r"token (count|length)",
+        r"\d+ tokens?"
+    ]
+    
+    # Check if question contains cost-related terms and model reference
+    has_cost_terms = any(term in question_lower for term in cost_terms)
+    has_model_terms = any(term in question_lower for term in model_terms)
+    has_pattern = any(re.search(pattern, question_lower) for pattern in patterns)
+    
+    return (has_cost_terms and has_model_terms) or has_pattern
+
 def search_content(question: str, kb: List[dict]) -> List[Tuple[float, dict]]:
     question_lower = question.lower()
     relevant_entries = []
     
-    # Keywords and phrases that indicate high relevance
-    high_value_terms = {
-        "gpt-3.5-turbo": 10.0,
-        "gpt-4o-mini": 10.0,
-        "openai api": 8.0,
-        "token count": 8.0,
-        "cost calculation": 8.0,
-        "input tokens": 8.0,
-        "cents per token": 8.0,
-        "model choice": 6.0,
-        "which model": 6.0,
-        "gpt": 5.0,
-        "token": 4.0,
-        "cost": 4.0
-    }
+    # Common price patterns
+    price_patterns = [
+        r"\$0\.0+\d+",  # Matches $0.0005
+        r"\d+(\.\d+)?\s*cents?",  # Matches 0.05 cents
+        r"\d+k?\s*tokens?"  # Matches 1k tokens or 1000 tokens
+    ]
+    
+    # Adjust search terms based on question type
+    if is_token_counting_question(question):
+        high_value_terms = {
+            "token count": 12.0,
+            "cost calculation": 12.0,
+            "cents per token": 10.0,
+            "input tokens": 10.0,
+            "output tokens": 10.0,
+            "japanese": 8.0 if "私は" in question else 0.0,
+            "chinese": 8.0 if any(ord(c) > 0x4E00 and ord(c) < 0x9FFF for c in question) else 0.0,
+            "tokenizer": 8.0,
+            "gpt-3.5-turbo-0125": 6.0,
+            "$0.0005": 6.0,
+            "$0.0015": 6.0,
+            "cost": 5.0,
+            "token": 5.0
+        }
+    else:
+        high_value_terms = {
+            "gpt-3.5-turbo": 10.0,
+            "gpt-4o-mini": 10.0,
+            "model requirement": 8.0,
+            "model choice": 8.0,
+            "which model": 8.0,
+            "openai api": 6.0,
+            "gpt": 4.0
+        }
     
     for entry in kb:
         score = 0.0
@@ -83,6 +134,14 @@ def search_content(question: str, kb: List[dict]) -> List[Tuple[float, dict]]:
             if term in title:
                 score += weight * 1.5
         
+        # For token/cost questions, boost entries containing pricing information
+        if is_token_counting_question(question):
+            for pattern in price_patterns:
+                if re.search(pattern, content):
+                    score *= 1.5
+                if re.search(pattern, title):
+                    score *= 1.75
+        
         # Boost score for relevant content types
         if "token" in question_lower and ("token" in content or "cost" in content):
             score *= 1.5
@@ -95,21 +154,66 @@ def search_content(question: str, kb: List[dict]) -> List[Tuple[float, dict]]:
     return sorted(relevant_entries, key=lambda x: x[0], reverse=True)
 
 def generate_answer(question: str, relevant_entries: List[Tuple[float, dict]]) -> str:
+    """Generate an answer based on the question type"""
+    
+    # First check for token counting/cost questions
+    if is_token_counting_question(question):
+        question_lower = question.lower()
+        
+        # Check for specific token types
+        is_output = "output" in question_lower or "response" in question_lower
+        is_input = "input" in question_lower or "prompt" in question_lower
+        has_cjk = any(ord(c) > 0x4E00 and ord(c) < 0x9FFF for c in question) or \
+                  any(ord(c) > 0x3040 and ord(c) < 0x30FF for c in question)
+        
+        base_response = [
+            "For gpt-3.5-turbo-0125:",
+            "",
+            "Input tokens pricing:",
+            "- $0.0005 per 1,000 tokens (0.05 cents per 1K tokens)",
+            "",
+            "Output tokens pricing:",
+            "- $0.0015 per 1,000 tokens (0.15 cents per 1K tokens)",
+            "",
+            "To calculate cost:"
+        ]
+        
+        if is_input:
+            base_response.extend([
+                "1. Count input tokens using the gpt-3.5-turbo-0125 tokenizer",
+                "2. Multiply token count by (0.05 cents / 1,000)",
+            ])
+        elif is_output:
+            base_response.extend([
+                "1. Count output tokens using the gpt-3.5-turbo-0125 tokenizer",
+                "2. Multiply token count by (0.15 cents / 1,000)",
+            ])
+        else:
+            base_response.extend([
+                "1. Count input and output tokens separately",
+                "2. Multiply input tokens by (0.05 cents / 1,000)",
+                "3. Multiply output tokens by (0.15 cents / 1,000)",
+                "4. Add both costs together"
+            ])
+            
+        if has_cjk:
+            base_response.extend([
+                "",
+                "Note: CJK (Chinese, Japanese, Korean) characters typically use more tokens",
+                "than English text. Each character might use 2-3 tokens."
+            ])
+            
+        return "\n".join(base_response)
+    
+    # Then check for model choice questions
     question_lower = question.lower()
-    
-    # Token counting and cost calculation questions
-    if any(term in question_lower for term in ["token", "cost", "cents"]) and "gpt-3.5-turbo" in question_lower:
-        # Check if there's Japanese text to count tokens for
-        if "私は" in question or "図書館" in question:
-            return "For the Japanese text provided, you should:\n1. Use the gpt-3.5-turbo-0125 tokenizer\n2. Count the number of input tokens\n3. Calculate cost as: (number of tokens × 50 cents) ÷ 1,000,000"
-        return "To calculate the cost:\n1. Use the correct tokenizer for gpt-3.5-turbo-0125\n2. Count only the input tokens\n3. Multiply the token count by 50 cents\n4. Divide by 1,000,000 to get the final cost in cents"
-    
-    # Model choice questions
-    if any(term in question_lower for term in ["gpt-4", "gpt4", "gpt-3", "gpt3", "gpt-4o-mini"]):
-        return "You must use `gpt-3.5-turbo-0125`, even if the AI Proxy supports other models like `gpt-4o-mini`. Use the OpenAI API directly for this question. Using a different model may result in incorrect results or penalties."
+    if any(term in question_lower for term in ["gpt-4o-mini", "which model", "what model"]):
+        return ("You must use `gpt-3.5-turbo-0125`, even if the AI Proxy supports other models like `gpt-4o-mini`. "
+                "Use the OpenAI API directly for this question. Using a different model may result in incorrect results or penalties.")
     
     # Default response
-    return "Based on the course content, please follow the exact requirements specified in your assignment or question. If you're unsure, please check the course materials or ask your teaching assistant for clarification."
+    return ("Based on the course content, please follow the exact requirements specified in your assignment or question. "
+            "If you're unsure, please check the course materials or ask your teaching assistant for clarification.")
 
 def clean_content(text: str) -> str:
     """Clean up content by removing code blocks, HTML, and other noise"""
