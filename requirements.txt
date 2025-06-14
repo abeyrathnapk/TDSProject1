@@ -1,0 +1,6 @@
+fastapi==0.115.12
+uvicorn==0.34.3
+requests
+beautifulsoup4
+python-multipart
+pydantic

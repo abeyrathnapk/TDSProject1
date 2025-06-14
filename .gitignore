@@ -38,3 +38,7 @@ ENV/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Exclude original JSON files but include the data directory
+/*.json
+!/data/*.json

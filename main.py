@@ -1,15 +1,30 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Tuple
 import json
 import os
 from difflib import SequenceMatcher
 import re
+from pathlib import Path
+
+# Initialize FastAPI app
+app = FastAPI()
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Get the directory containing main.py
+BASE_DIR = Path(__file__).resolve().parent
 
 # Path to your combined knowledge base
-KB_PATH = "tds_course_content.json"
-
-app = FastAPI()
+KB_PATH = BASE_DIR / "tds_course_content.json"
 
 class Link(BaseModel):
     url: str
@@ -273,15 +288,34 @@ def get_relevant_links(relevant_entries: List[Tuple[float, dict]], question: str
             
     return links
 
+# Load knowledge base data
+def load_knowledge_base():
+    try:
+        if not KB_PATH.exists():
+            # For testing/development, return empty data
+            print(f"Warning: Knowledge base file not found at {KB_PATH}")
+            return []
+        with open(KB_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading knowledge base: {e}")
+        return []
+
+@app.get("/")
+async def root():
+    """Health check endpoint"""
+    return {"status": "ok", "message": "TDS Virtual TA API is running"}
+
 @app.post("/api/", response_model=QAResponse)
 async def answer_question(req: QARequest):
     try:
         # Load knowledge base
-        if not os.path.exists(KB_PATH):
-            return {"answer": "Knowledge base not found.", "links": []}
-            
-        with open(KB_PATH, "r", encoding="utf-8") as f:
-            kb = json.load(f)
+        kb = load_knowledge_base()
+        if not kb:
+            return {
+                "answer": "Knowledge base is currently unavailable. Please try again later.",
+                "links": []
+            }
             
         # Search for relevant content
         relevant_entries = search_content(req.question, kb)
@@ -289,10 +323,15 @@ async def answer_question(req: QARequest):
         # Generate answer
         answer = generate_answer(req.question, relevant_entries)
         
-        # Get relevant links with question context
+        # Get relevant links
         links = get_relevant_links(relevant_entries, req.question)
         
         return {"answer": answer, "links": links}
         
     except Exception as e:
-        return {"answer": f"An error occurred: {str(e)}", "links": []}
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
