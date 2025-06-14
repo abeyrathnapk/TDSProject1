@@ -160,49 +160,91 @@ def generate_answer(question: str, relevant_entries: List[Tuple[float, dict]]) -
     if is_token_counting_question(question):
         question_lower = question.lower()
         
-        # Check for specific token types
+        # Extract text to be analyzed if it's in quotes
+        text_to_analyze = None
+        quote_match = re.search(r'["\']([^"\']+)["\']', question)
+        if quote_match:
+            text_to_analyze = quote_match.group(1)
+        
+        # Check for specific token types and pricing
         is_output = "output" in question_lower or "response" in question_lower
-        is_input = "input" in question_lower or "prompt" in question_lower
-        has_cjk = any(ord(c) > 0x4E00 and ord(c) < 0x9FFF for c in question) or \
-                  any(ord(c) > 0x3040 and ord(c) < 0x30FF for c in question)
+        is_input = "input" in question_lower or not is_output
+        has_cjk = text_to_analyze and (
+            any(ord(c) > 0x4E00 and ord(c) < 0x9FFF for c in text_to_analyze) or  # Chinese
+            any(ord(c) > 0x3040 and ord(c) < 0x30FF for c in text_to_analyze)      # Japanese
+        )
         
-        base_response = [
-            "For gpt-3.5-turbo-0125:",
-            "",
-            "Input tokens pricing:",
-            "- $0.0005 per 1,000 tokens (0.05 cents per 1K tokens)",
-            "",
-            "Output tokens pricing:",
-            "- $0.0015 per 1,000 tokens (0.15 cents per 1K tokens)",
-            "",
-            "To calculate cost:"
-        ]
+        # Look for specific cost rate in the question
+        cost_per_million = None
+        cost_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:cents?|¢)?\s*(?:per\s*million|\/\s*million)', question_lower)
+        if cost_match:
+            cost_per_million = float(cost_match.group(1))
         
-        if is_input:
+        if has_cjk and text_to_analyze and cost_per_million:
+            # For Japanese/Chinese text with specific cost rate
+            char_count = len(text_to_analyze)
+            approx_tokens = char_count * 2  # Approximate: most CJK chars use 2-3 tokens
+            
+            response = [
+                f"For the given Japanese text ({char_count} characters):",
+                "",
+                "1. Expected token count:",
+                f"   - Approximately {approx_tokens} tokens (Japanese characters typically use 2-3 tokens each)",
+                "",
+                "2. Cost calculation:",
+                f"   - Cost per million tokens: {cost_per_million} cents",
+                f"   - Formula: ({approx_tokens} tokens × {cost_per_million} cents) ÷ 1,000,000",
+                f"   - Estimated cost: {(approx_tokens * cost_per_million / 1_000_000):.6f} cents",
+                "",
+                "Note: This is an estimate. The actual token count may vary.",
+                "For exact count, use the OpenAI tokenizer: tiktoken"
+            ]
+            return "\n".join(response)
+        
+        elif has_cjk:
+            # For Japanese/Chinese text without specific cost rate
+            response = [
+                "For Japanese text, follow these steps:",
+                "",
+                "1. Use the gpt-3.5-turbo-0125 tokenizer (tiktoken)",
+                "2. Get exact token count (Japanese uses 2-3 tokens per character)",
+                "3. Calculate cost: (token_count × cost_per_million) ÷ 1,000,000",
+                "",
+                "Example:",
+                "- 10 Japanese characters ≈ 20-30 tokens",
+                "- With 50¢ per million tokens:",
+                "  20 tokens = (20 × 50¢) ÷ 1,000,000 = 0.001¢",
+                "",
+                "For exact calculation, use tiktoken to count tokens"
+            ]
+            return "\n".join(response)
+        
+        # For other token/cost questions
+        base_response = []
+        
+        if cost_per_million:
             base_response.extend([
-                "1. Count input tokens using the gpt-3.5-turbo-0125 tokenizer",
-                "2. Multiply token count by (0.05 cents / 1,000)",
-            ])
-        elif is_output:
-            base_response.extend([
-                "1. Count output tokens using the gpt-3.5-turbo-0125 tokenizer",
-                "2. Multiply token count by (0.15 cents / 1,000)",
+                f"With {cost_per_million} cents per million tokens:",
+                "",
+                "1. Count tokens using gpt-3.5-turbo-0125 tokenizer",
+                f"2. Calculate: (token_count × {cost_per_million}) ÷ 1,000,000",
+                "",
+                "Example:",
+                f"- 100 tokens = (100 × {cost_per_million}) ÷ 1,000,000 = {(100 * cost_per_million / 1_000_000):.6f} cents"
             ])
         else:
             base_response.extend([
-                "1. Count input and output tokens separately",
-                "2. Multiply input tokens by (0.05 cents / 1,000)",
-                "3. Multiply output tokens by (0.15 cents / 1,000)",
-                "4. Add both costs together"
-            ])
-            
-        if has_cjk:
-            base_response.extend([
+                "For gpt-3.5-turbo-0125:",
                 "",
-                "Note: CJK (Chinese, Japanese, Korean) characters typically use more tokens",
-                "than English text. Each character might use 2-3 tokens."
+                "Input token cost:",
+                "- $0.0005 per 1K tokens (0.05¢ per 1K)",
+                "- $0.50 per million tokens",
+                "",
+                "To calculate:",
+                "1. Count input tokens using the tokenizer",
+                "2. Calculate: (token_count × 50) ÷ 1,000,000"
             ])
-            
+        
         return "\n".join(base_response)
     
     # Then check for model choice questions
